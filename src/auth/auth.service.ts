@@ -1,6 +1,9 @@
 import {
+  BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
+  NotFoundException,
   ServiceUnavailableException,
   UnauthorizedException,
 } from "@nestjs/common";
@@ -16,7 +19,7 @@ import { MailService } from "../mail/mail.service";
 @Injectable()
 export class AuthService {
   constructor(
-    private readonly jwtSerive: JwtService,
+    private readonly jwtService: JwtService,
     private readonly usersService: UsersService,
     private readonly mailService: MailService
   ) {}
@@ -27,11 +30,11 @@ export class AuthService {
       is_premium: user.is_premium,
     };
     const [accessToken, refreshToken] = await Promise.all([
-      this.jwtSerive.signAsync(payload, {
+      this.jwtService.signAsync(payload, {
         secret: process.env.ACCESS_TOKEN_KEY,
         expiresIn: process.env.ACCESS_TOKEN_TIME,
       }),
-      this.jwtSerive.signAsync(payload, {
+      this.jwtService.signAsync(payload, {
         secret: process.env.REFRESH_TOKEN_KEY,
         expiresIn: process.env.REFRESH_TOKEN_TIME,
       }),
@@ -91,7 +94,7 @@ export class AuthService {
 
     let payload: any;
     try {
-      payload = await this.jwtSerive.verifyAsync(token, {
+      payload = await this.jwtService.verifyAsync(token, {
         secret: process.env.REFRESH_TOKEN_KEY,
       });
     } catch (error) {
@@ -123,10 +126,27 @@ export class AuthService {
       accessToken,
     };
   }
-  async logout(res: Response) {
+
+  async logout(refreshToken: string, res: Response) {
+    let userData: any;
+    try {
+      userData = await this.jwtService.verify(refreshToken, {
+        secret: process.env.REFRESH_TOKEN_KEY,
+      });
+    } catch (error) {
+      console.log(error);
+      throw new BadRequestException(error);
+    }
+
+    if (!userData) {
+      throw new ForbiddenException("User not found");
+    }
+    await this.usersService.updateRefreshToken(userData.id, "");
+
     res.clearCookie("refreshToken");
     return { message: "Logged out" };
   }
+
   async activate(activationLink: string) {
     const user = await this.usersService.findByActivationLink(activationLink);
     if (!user) {
@@ -141,5 +161,47 @@ export class AuthService {
     await user.save();
 
     return { message: "Your account has been successfully activated" };
+  }
+  async refreshToken(
+    userId: number,
+    refreshTokenFromCookie: string,
+    res: Response
+  ) {
+    const decodedToken = await this.jwtService.decode(refreshTokenFromCookie);
+
+    if (userId !== decodedToken["id"]) {
+      throw new ForbiddenException("You have no permission");
+    }
+
+    const user = await this.usersService.findOne(userId);
+    if (!user || !user.refresh_token) {
+      throw new NotFoundException("User not found or no refresh token");
+    }
+
+    const tokenMatch = await bcrypt.compare(
+      refreshTokenFromCookie,
+      user.refresh_token
+    );
+    if (!tokenMatch) {
+      throw new ForbiddenException("Refresh token does not match");
+    }
+
+    const { accessToken, refreshToken } = await this.generateTokens(user);
+
+    const hashedRefreshToken = await bcrypt.hash(refreshToken, 7);
+    await this.usersService.updateRefreshToken(user.id, hashedRefreshToken);
+
+    res.cookie("refreshToken", refreshToken, {
+      maxAge: Number(process.env.COOKIE_TIME),
+      httpOnly: true,
+      secure: true,
+      sameSite: "strict",
+    });
+
+    return {
+      message: "Tokens refreshed successfully",
+      userId: user.id,
+      accessToken,
+    };
   }
 }

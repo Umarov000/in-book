@@ -60,4 +60,11 @@ export class UsersService {
   async findByActivationLink(link: string): Promise<User | null> {
     return this.userModel.findOne({ where: { activation_link: link } });
   }
+  async updateRefreshToken(id: number, refresh_token: string) {
+    const updatedUser = await this.userModel.update(
+      { refresh_token },
+      { where: { id } }
+    );
+    return updatedUser;
+  }
 }
